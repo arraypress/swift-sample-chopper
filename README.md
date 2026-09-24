@@ -29,7 +29,11 @@ pack.bpm, pack.key, pack.items                                     // 130.4, "Eb
 | `<Stem>/MIDI` | `Bass Loop 4 Bar - 130.4 BPM - Ebmin - 01.mid` | One MIDI file per bass, other and vocal loop, transcribed by MuScriptor from that loop alone — bar 1 at the loop's start, the pack's tempo — so every loop has its notes beside it. `midiFull` adds one file per stem over the whole song. |
 | `manifest.json` | every item's bar, beat, start, length, label, note, cents, confidence | |
 
-Tempo is the median beat gap of Beat This!, rounded to a whole number when within 0.15 of one;
+Tempo and bar phase are fitted to the audio: Beat This! proposes beats and downbeats, then a click
+train is swept over the drums' onset envelope and the period and offset collecting the most onset
+energy win, with beat one chosen on a separate envelope below 200 Hz so it lands on the kick. The
+tracker's downbeat spacing is used only to tell three beats to the bar from four, because it
+sometimes marks a downbeat every half bar. Tempo
 key is `MusicAnalysis` on the other stem. Nothing is time-stretched or re-pitched: the pack is
 the song, cut.
 

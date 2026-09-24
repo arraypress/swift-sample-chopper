@@ -16,6 +16,18 @@ pitch-tracker, music-analysis) — a path dep on music-analysis conflicts with
 music-transcriber's URL dep on it ("conflicting identity").
 
 ## Traps (measured)
+- **The beat tracker's downbeats are not the bar.** On one 4/4 track it marked
+  a downbeat every HALF bar: `beatsPerBar = round(barGap/beat)` gave 2, every
+  "4 bar" loop was two bars, and the fill logic then inserted a phantom
+  downbeat inside every real bar. The time signature is now 3 only when the
+  ratio says 3 or 6, else 4, and the grid is uniform from a fitted phase.
+- **Tempo and phase are fitted to the audio**, not read off the tracker: a
+  click train is swept over the drums' onset envelope (±3% in 0.05% steps,
+  48 phases) and the best-scoring period wins. On a track whose upload runs
+  slightly slow this scored 4.41 at 135.8 BPM against 1.15 at 136 — the
+  audio really is 135.8, and rounding to 136 would drift. Beat ONE is chosen
+  on a SEPARATE envelope below 200 Hz (the kick): the full-band flux picks a
+  hi-hat, which put the phase a beat out in the test.
 - **Frame-start onset times are up to 43 ms early** with a 2048 window;
   centre the frames AND refine each onset to the attack (first 1 ms window
   reaching 20% of the local peak) — pre-roll went from tens of ms to ≤ 2 ms.

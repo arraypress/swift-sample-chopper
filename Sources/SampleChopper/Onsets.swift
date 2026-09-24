@@ -27,6 +27,38 @@ public enum OnsetDetector {
         public init() {}
     }
 
+    /// The spectral-flux envelope and its hop: the positive change of a log magnitude spectrum,
+    /// frame to frame, centred so frame f covers sample f·hop.
+    /// `below` limits the sum to bins under that frequency, which is how the kick is found.
+    public static func envelope(_ mono: [Float], sampleRate: Double, options: Options = Options(), below: Double? = nil) -> (values: [Float], hop: Int) {
+        let n = options.frame, hop = options.hop
+        var bins = n / 2 + 1
+        if let below { bins = max(2, min(bins, Int(below / sampleRate * Double(n)) + 1)) }
+        guard mono.count > n * 2, let setup = vDSP_DFT_zop_CreateSetup(nil, vDSP_Length(n), .FORWARD) else { return ([], hop) }
+        defer { vDSP_DFT_DestroySetup(setup) }
+        let padded = [Float](repeating: 0, count: n / 2) + mono + [Float](repeating: 0, count: n / 2)
+        let frames = (padded.count - n) / hop + 1
+        let window = (0..<n).map { Float(0.5 - 0.5 * cos(2 * Double.pi * Double($0) / Double(n))) }
+        var inRe = [Float](repeating: 0, count: n), outRe = [Float](repeating: 0, count: n), outIm = [Float](repeating: 0, count: n)
+        let inIm = [Float](repeating: 0, count: n)
+        var previous = [Float](repeating: 0, count: bins), current = [Float](repeating: 0, count: bins)
+        var flux = [Float](repeating: 0, count: frames)
+        for f in 0..<frames {
+            vDSP_vmul(Array(padded[(f * hop)..<(f * hop + n)]), 1, window, 1, &inRe, 1, vDSP_Length(n))
+            vDSP_DFT_Execute(setup, inRe, inIm, &outRe, &outIm)
+            var sum: Float = 0
+            for b in 0..<bins {
+                let mag = log(1 + 10 * (outRe[b] * outRe[b] + outIm[b] * outIm[b]).squareRoot())
+                current[b] = mag
+                let d = mag - previous[b]
+                if d > 0 { sum += d }
+            }
+            flux[f] = sum / Float(bins)
+            swap(&previous, &current)
+        }
+        return (flux, hop)
+    }
+
     /// Onset times in seconds for mono samples at `sampleRate`: the flux peak's frame, centred,
     /// then refined to the attack itself — the first millisecond in ±30 ms whose RMS reaches a
     /// fifth of the local maximum — so a cut lands where the hit starts, not where a 43 ms window

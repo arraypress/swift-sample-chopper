@@ -44,6 +44,44 @@ private func click(at times: [Double], seconds: Double, rate: Double = 48_000) -
         #expect(g.position(of: 0.1 + 1.875 * 2 + 0.47).bar == 2 && g.position(of: 0.1 + 1.875 * 2 + 0.47).beat == 2)
     }
 
+    /// The tracker marked a downbeat every half bar on a real 4/4 track, which read as 2/4 and
+    /// halved every loop. The time signature must come out 4, the tempo must be fitted to the
+    /// audio rather than to the tracker's spacing, and beat one must land on the kick.
+    @Test("half-bar downbeats still give 4/4, and the phase lands on the kick")
+    func halfBarDownbeats() throws {
+        let sr = 48_000.0, bpm = 135.8, beat = 60 / bpm
+        let offset = 0.31                                    // the track does not start on a bar
+        var x = [Float](repeating: 0, count: Int(24 * 4 * beat * sr) + Int(sr))
+        func hit(_ time: Double, _ gain: Float, _ freq: Double, _ decay: Double) {
+            let start = Int(time * sr)
+            for i in 0..<Int(decay * 4 * sr) where start + i < x.count {
+                let t = Double(i) / sr
+                x[start + i] += gain * Float(sin(2 * .pi * freq * t) * exp(-t / decay))
+            }
+        }
+        for b in 0..<24 {
+            let bar = offset + Double(b) * 4 * beat
+            hit(bar, 1.0, 55, 0.08)                          // kick, beat 1 — loudest
+            hit(bar + beat, 0.4, 3000, 0.02)                 // hat
+            hit(bar + 2 * beat, 0.6, 190, 0.05)              // snare, beat 3
+            hit(bar + 3 * beat, 0.4, 3000, 0.02)
+        }
+        let (values, hop) = OnsetDetector.envelope(x, sampleRate: sr)
+        let (bass, _) = OnsetDetector.envelope(x, sampleRate: sr, below: 200)
+        let envelope = BarGrid.Envelope(values: values, bass: bass, hop: hop, sampleRate: sr)
+        // what the tracker gave: beats right, "downbeats" every two beats
+        let beats = (0..<96).map { offset + Double($0) * beat }
+        let downbeats = stride(from: 0, to: 96, by: 2).map { beats[$0] }
+        let g = try BarGrid(beats: beats, downbeats: downbeats, envelope: envelope)
+        #expect(g.beatsPerBar == 4, Comment(rawValue: "\(g.beatsPerBar)/4"))
+        #expect(abs(g.bpm - 135.8) < 0.3, Comment(rawValue: "\(g.bpm) BPM"))
+        #expect(g.refined)
+        let first = try #require(g.downbeats.first)
+        let toKick = (first - offset).truncatingRemainder(dividingBy: 4 * beat)
+        #expect(min(toKick, 4 * beat - toKick) < 0.03, Comment(rawValue: "first downbeat \(first)s, kicks at \(offset) + n·\(4 * beat)"))
+        #expect(abs(g.barSeconds - 4 * 60 / g.bpm) < 1e-9)
+    }
+
     /// Beat This! halves its beat rate under sparse sections and misses the odd downbeat;
     /// the tempo must still come out at the downbeats' rate, and the missed bars come back.
     @Test("half-time beats and missed downbeats do not move the tempo")
