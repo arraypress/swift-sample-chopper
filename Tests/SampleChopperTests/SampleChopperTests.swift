@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import MIDIFileKit
 import Testing
 @testable import SampleChopper
 
@@ -54,6 +55,51 @@ private func click(at times: [Double], seconds: Double, rate: Double = 48_000) -
         let stem = try StemAudio(kind: .vocals, url: url)
         let phrases = PhraseCutter.cut(stem)
         #expect(phrases.count == 1 && abs(phrases[0].start - 0.47) < 0.02 && abs(phrases[0].seconds - 1.06) < 0.03, "\(phrases.map { ($0.start, $0.seconds) })")
+    }
+}
+
+@Suite struct DrumPatternTests {
+
+    @Test("hits inside the loop become General MIDI notes at their beats with velocity from level")
+    func events() throws {
+        let sr = 48_000.0, bpm = 120.0
+        let hits: [(onset: Double, peakDB: Float, label: String)] = [
+            (1.0, -1, "kick"), (1.5, -13, "hat"), (2.0, -4, "snare"), (2.5, -40, "hat"), (2.9, -2, "fx"), (3.1, -1, "kick"),
+        ]
+        let range = Int(1.0 * sr)..<Int(3.0 * sr)           // 2 s = one bar at 120
+        let events = DrumPattern.events(hits: hits, range: range, sampleRate: sr, bpm: bpm)
+        #expect(events.map(\.note) == [36, 42, 38, 42], "fx is skipped, the kick at 3.1 is outside")
+        #expect(events.map { ($0.beat * 100).rounded() / 100 } == [0, 1, 2, 3])
+        #expect(events[0].velocity == 127 && events[1].velocity == Int((127 - 12.0 / 24 * 87).rounded()) && events[3].velocity == 40)
+        let data = try DrumPattern.midi(events: events, bpm: bpm, beatsPerBar: 4, name: "test")
+        let file = try MIDIReader.read(data)
+        #expect(file.notes.map(\.pitch.number) == [36, 42, 38, 42] && file.notes.allSatisfy { $0.channel == 9 })
+        #expect(abs(file.tempoMap.initial.bpm - 120) < 0.01)
+    }
+}
+
+@Suite struct HPSSTests {
+
+    private func floats(_ name: String) throws -> [Float] {
+        let url = try #require(Bundle.module.url(forResource: name, withExtension: "f32", subdirectory: "Fixtures"))
+        return try Data(contentsOf: url).withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+    private func psnr(_ a: [Float], _ b: [Float]) -> Double {
+        var err = 0.0, lo = Double.infinity, hi = -Double.infinity
+        for i in a.indices { let d = Double(a[i]) - Double(b[i]); err += d * d; lo = min(lo, Double(a[i])); hi = max(hi, Double(a[i])) }
+        let mse = err / Double(a.count); return mse == 0 ? .infinity : 20 * log10((hi - lo) / mse.squareRoot())
+    }
+
+    @Test("the split matches librosa.effects.hpss at margins 1 and 3", arguments: [Float(1), Float(3)])
+    func parity(margin: Float) throws {
+        let x = try floats("hpss_input")
+        let tag = margin == 1 ? "" : "_m\(Int(margin))"
+        let refH = try floats("hpss_harmonic\(tag)"), refP = try floats("hpss_percussive\(tag)")
+        let (h, p) = HPSS.separate(x, margin: margin)
+        #expect(h.count == refH.count && p.count == refP.count)
+        let dbH = psnr(refH, h), dbP = psnr(refP, p)
+        print("hpss margin \(margin): harmonic \(String(format: "%.1f", dbH)) dB, percussive \(String(format: "%.1f", dbP)) dB")
+        #expect(dbH > 60 && dbP > 60)
     }
 }
 

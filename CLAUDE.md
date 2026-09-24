@@ -27,5 +27,12 @@ music-transcriber's URL dep on it ("conflicting identity").
   the written loop file with `tempo: .off`, clamp notes to the loop, assemble
   with `BeatGrid.fixed(bpm:)` so bar 1 is the loop's start. `midiFull` (off)
   does the whole stem shifted to the first downbeat.
+- `HPSS` is librosa's `effects.hpss` exactly (centre zero-pad, periodic Hann,
+  scipy 'reflect' medians, softmask power 2, iSTFT over window-sum-square):
+  154–162 dB on a real loop at margins 1 and 3. Margin 1 leaves NO residual
+  (masks sum to 1); noise/FX only appears as the residual at margin > 1.
+  A white-noise riser splits 50/50 at margin 1 — measure before claiming.
+- Drum-pattern MIDI needs every hit's label, not just the group leaders':
+  `labelled` maps each hit in a group to its leader's CLAP label.
 - One Core AI job on the GPU at a time; the builder runs its models one after
   another.

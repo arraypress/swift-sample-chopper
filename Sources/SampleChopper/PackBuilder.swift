@@ -61,6 +61,15 @@ public struct PackOptions: Sendable {
     public var oneShotsPerLabel = 8
     public var bassNotesPerName = 2
     public var loops = LoopCutter.Options()
+    /// Loop lengths for the melodic stems and for the drums; `bars` overrides both when set.
+    public var melodicBars = [4, 2]
+    public var drumBars = [4, 2, 1]
+    public var bars: [Int]? = nil
+    /// Beside each drum loop, a Dry and an FX file: FX is what neither a steady tone nor a
+    /// transient claims (median-filter split at margin 3) — sweeps, washes, tails.
+    public var drumLayers = false
+    /// Drum-pattern MIDI for every drum loop.
+    public var drumMidi = true
     public var hits = HitCutter.Options()
     public var onsets = OnsetDetector.Options()
     public var phrases = PhraseCutter.Options()
@@ -172,6 +181,11 @@ public final class PackBuilder: @unchecked Sendable {
             let (label, score, probability) = try await namer.name(Array(drums.mono[lead.range]), sampleRate: sr)
             byLabel[label, default: []].append((lead, score, probability))
         }
+        var labelled: [(onset: Double, peakDB: Float, label: String)] = []
+        for group in groups {
+            guard let label = byLabel.first(where: { $0.value.contains { $0.hit.onset == group[0].onset } })?.key else { continue }
+            for hit in group { labelled.append((hit.onset, hit.peakDB, label)) }
+        }
         for (label, list) in byLabel.sorted(by: { $0.key < $1.key }) {
             let chosen = list.sorted { ($0.hit.cleanliness + 20 * $0.score) > ($1.hit.cleanliness + 20 * $1.score) }.prefix(options.oneShotsPerLabel)
             for (n, entry) in chosen.enumerated() {
@@ -220,14 +234,39 @@ public final class PackBuilder: @unchecked Sendable {
         for stem in stems {
             progress?("\(stem.kind.rawValue) loops")
             var counter: [Int: Int] = [:]
-            let loops = LoopCutter.cut(stem, grid: grid, options: options.loops)
+            var loopOptions = options.loops
+            loopOptions.lengths = options.bars ?? (stem.kind == .drums ? options.drumBars : options.melodicBars)
+            let loops = LoopCutter.cut(stem, grid: grid, options: loopOptions)
             for (i, loop) in loops.enumerated() {
                 let n = counter[loop.bars, default: 0] + 1; counter[loop.bars] = n
                 let keyPart = key.map { " - \($0)" } ?? ""
                 let base = "\(options.name) - \(title(stem.kind.rawValue)) Loop \(loop.bars) Bar - \(bpmText) BPM\(keyPart) - \(two(n))"
                 let file = root.appendingPathComponent("\(title(stem.kind.rawValue))/Loops/\(base).wav")
-                try StemAudio.write(stem.slice(loop.range, fadeIn: options.loops.fade, fadeOut: options.loops.fade), sampleRate: sr, to: file)
+                let slice = stem.slice(loop.range, fadeIn: options.loops.fade, fadeOut: options.loops.fade)
+                try StemAudio.write(slice, sampleRate: sr, to: file)
                 items.append(item(file, stem: stem, kind: "loop", range: loop.range, bars: loop.bars))
+                if stem.kind == .drums {
+                    if options.drumLayers {
+                        progress?("drum layers \(i + 1)/\(loops.count)")
+                        let fx = slice.map { HPSS.residual($0, margin: 3) }
+                        let dry = zip(slice, fx).map { zip($0, $1).map { $0 - $1 } }
+                        let dryFile = root.appendingPathComponent("Drums/Layers/\(base) (Dry).wav"), fxFile = root.appendingPathComponent("Drums/Layers/\(base) (FX).wav")
+                        try StemAudio.write(dry, sampleRate: sr, to: dryFile); try StemAudio.write(fx, sampleRate: sr, to: fxFile)
+                        items.append(item(dryFile, stem: stem, kind: "layer", range: loop.range, label: "dry", bars: loop.bars))
+                        items.append(item(fxFile, stem: stem, kind: "layer", range: loop.range, label: "fx", bars: loop.bars))
+                    }
+                    if options.drumMidi {
+                        let events = DrumPattern.events(hits: labelled, range: loop.range, sampleRate: sr, bpm: grid.bpm)
+                        if !events.isEmpty {
+                            let midiFile = root.appendingPathComponent("Drums/MIDI/\(base).mid")
+                            try FileManager.default.createDirectory(at: midiFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+                            try DrumPattern.midi(events: events, bpm: grid.bpm, beatsPerBar: grid.beatsPerBar, name: base).write(to: midiFile)
+                            items.append(Pack.Item(file: midiFile.path, stem: "drums", kind: "midi", label: nil, note: nil, cents: nil, confidence: nil, bars: loop.bars,
+                                                   bar: grid.position(of: loop.start).bar + 1, beat: 1, start: (loop.start * 1000).rounded() / 1000,
+                                                   seconds: (Double(loop.range.count) / sr * 1000).rounded() / 1000, peakDB: 0))
+                        }
+                    }
+                }
                 if options.midi, stem.kind != .drums, let transcriber {
                     progress?("\(stem.kind.rawValue) loop midi \(i + 1)/\(loops.count)")
                     let transcription = try await transcriber.transcribe(file, tempo: .off)
