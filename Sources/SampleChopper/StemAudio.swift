@@ -16,7 +16,13 @@ import MusicTranscriber
 /// One stem's samples.
 public struct StemAudio: Sendable {
 
-    public enum Kind: String, CaseIterable, Sendable { case drums, bass, other, vocals }
+    public enum Kind: String, CaseIterable, Sendable {
+        case drums, bass, other, vocals
+        /// Everything but the drums, summed: where a melody that separation scattered comes back together.
+        case music
+        /// The four kinds `stems` writes.
+        public static let separated: [Kind] = [.drums, .bass, .other, .vocals]
+    }
 
     public let kind: Kind
     public let url: URL
@@ -48,6 +54,28 @@ public struct StemAudio: Sendable {
             for i in m.indices { m[i] = (channels[0][i] + channels[1][i]) * 0.5 }
             mono = m
         }
+    }
+
+    /// A stem built from samples — the sum of others, for instance. Peaks above 1 are scaled back.
+    public init(kind: Kind, url: URL, sampleRate: Double, channels: [[Float]]) {
+        let peak = channels.map { Self.peak($0) }.max() ?? 0
+        let scaled = peak > 1 ? channels.map { ch in ch.map { $0 / peak } } : channels
+        self.kind = kind; self.url = url; self.sampleRate = sampleRate; self.channels = scaled
+        if scaled.count == 1 { mono = scaled[0] } else {
+            var m = [Float](repeating: 0, count: scaled[0].count)
+            for i in m.indices { m[i] = (scaled[0][i] + scaled[1][i]) * 0.5 }
+            mono = m
+        }
+    }
+
+    /// The sum of stems (same rate and length), as `kind`.
+    public static func sum(_ stems: [StemAudio], kind: Kind) -> StemAudio? {
+        guard let first = stems.first else { return nil }
+        let count = stems.map(\.count).min() ?? 0
+        let channelCount = stems.map { $0.channels.count }.min() ?? 1
+        var out = [[Float]](repeating: [Float](repeating: 0, count: count), count: channelCount)
+        for stem in stems { for c in 0..<channelCount { for i in 0..<count { out[c][i] += stem.channels[c][i] } } }
+        return StemAudio(kind: kind, url: first.url.deletingLastPathComponent().appendingPathComponent("music"), sampleRate: first.sampleRate, channels: out)
     }
 
     /// A slice of every channel, with fades, as `[channel][sample]`.

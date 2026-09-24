@@ -32,6 +32,19 @@ music-transcriber's URL dep on it ("conflicting identity").
   154–162 dB on a real loop at margins 1 and 3. Margin 1 leaves NO residual
   (masks sum to 1); noise/FX only appears as the residual at margin > 1.
   A white-noise riser splits 50/50 at margin 1 — measure before claiming.
+- `PhraseFinder`: chroma per sixteenth, MAGNITUDE not log-compressed —
+  `log(1 + 100·energy)` flattened leakage into a floor that made every bar
+  look alike (A vs B 0.8+); with magnitudes identical bars score 1.00 and
+  different chords 0.10–0.75 at the 0.8 repeat threshold. A phrase is the
+  SMALLEST span whose next span repeats it, unless a longer span repeats
+  better by `longerWinsBy` (0.02) — a melody that changes over a repeating
+  chord loop scores higher at its own length. Measured on the test track
+  (`PhraseDiagnostics`, CHOP_STEMS): "other" repeats at 4 bars (r4 0.86–0.97
+  above r8/r16) almost everywhere — the song IS 4-bar loops — with r8 > r4
+  only at a few starts (bass bar 32: 0.88 vs 0.76). Chroma baselines on
+  pad-heavy stems sit at 0.8+, so 16-bar structure is rarely evidenced.
+- `PackOptions.chops` are the vocal-chop options; `phrases` is the Bool for
+  musical phrases (the two names collided once).
 - Drum-pattern MIDI needs every hit's label, not just the group leaders':
   `labelled` maps each hit in a group to its leader's CLAP label.
 - One Core AI job on the GPU at a time; the builder runs its models one after

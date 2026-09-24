@@ -11,6 +11,7 @@
 
 import Foundation
 import MIDIFileKit
+import MusicTranscriber
 import Testing
 @testable import SampleChopper
 
@@ -58,6 +59,34 @@ private func click(at times: [Double], seconds: Double, rate: Double = 48_000) -
     }
 }
 
+@Suite struct PhraseTests {
+
+    /// A synthesised chord sequence: bars A B C D repeated, then E F repeated — phrases of 4 and 2 bars.
+    @Test("phrase length is the smallest span that repeats")
+    func phrases() throws {
+        let sr = 48_000.0, bpm = 120.0, bar = 2.0
+        let chords: [[Double]] = [[261.6, 329.6, 392.0], [293.7, 349.2, 440.0], [329.6, 392.0, 493.9], [349.2, 440.0, 523.3],   // A B C D
+                                  [220.0, 261.6, 329.6], [196.0, 246.9, 293.7]]                                                // E F
+        let sequence = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 4, 5, 4, 5, 4, 5]
+        var x = [Float](repeating: 0, count: Int(Double(sequence.count) * bar * sr))
+        for (b, c) in sequence.enumerated() {
+            for i in 0..<Int(bar * sr) { let t = Double(i) / sr; x[b * Int(bar * sr) + i] = Float(chords[c].map { sin(2 * .pi * $0 * t) }.reduce(0, +) * 0.2) }
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("phrase-\(UUID().uuidString).wav")
+        try StemAudio.write([x], sampleRate: sr, to: url); defer { try? FileManager.default.removeItem(at: url) }
+        let stem = try StemAudio(kind: .other, url: url)
+        let beats = (0..<(sequence.count * 4)).map { Double($0) * 60 / bpm }
+        let grid = try BarGrid(beats: beats, downbeats: stride(from: 0, to: beats.count, by: 4).map { beats[$0] })
+        let (bars, _) = PhraseFinder.barDescriptors(stem, grid: grid)
+        print("bar similarities vs bar 0: " + (1..<6).map { String(format: "%.2f", PhraseFinder.similarity(bars[0], bars[$0])) }.joined(separator: " ") + " | 12 vs 13, 14: " + [13, 14].map { String(format: "%.2f", PhraseFinder.similarity(bars[12], bars[$0])) }.joined(separator: " "))
+        var options = PhraseFinder.Options(); options.lengths = [2, 4, 8]
+        let phrases = PhraseFinder.find(stem, grid: grid, options: options)
+        let byStart = phrases.sorted { $0.startBar < $1.startBar }
+        #expect(byStart.map { ($0.startBar, $0.bars) }.map { "\($0)" } == ["(0, 4)", "(12, 2)"], "\(byStart.map { ($0.startBar, $0.bars, $0.repeats) })")
+        #expect(byStart[0].repeats == 2 && byStart[1].repeats == 3)
+    }
+}
+
 @Suite struct DrumPatternTests {
 
     @Test("hits inside the loop become General MIDI notes at their beats with velocity from level")
@@ -100,6 +129,27 @@ private func click(at times: [Double], seconds: Double, rate: Double = 48_000) -
         let dbH = psnr(refH, h), dbP = psnr(refP, p)
         print("hpss margin \(margin): harmonic \(String(format: "%.1f", dbH)) dB, percussive \(String(format: "%.1f", dbP)) dB")
         #expect(dbH > 60 && dbP > 60)
+    }
+}
+
+@Suite struct PhraseDiagnostics {
+    @Test("repeat scores on real stems", .enabled(if: ProcessInfo.processInfo.environment["CHOP_STEMS"] != nil))
+    func scores() async throws {
+        let folder = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CHOP_STEMS"]!)
+        let stems = try PackBuilder.stems(in: folder)
+        let drums = stems.first { $0.kind == .drums }!
+        let tracker = try await BeatThisTracker(contentsOf: ModelLocator.resolveBeatTracker())
+        let grid = try await BarGrid.detect(from: drums, tracker: tracker)
+        var sources = stems.filter { $0.kind != .drums }
+        if let music = StemAudio.sum(sources, kind: .music) { sources.append(music) }
+        for stem in sources {
+            let sc = PhraseFinder.scores(stem, grid: grid)
+            print("\(stem.kind.rawValue): bar  r4   r8   r16")
+            for s in stride(from: 16, to: min(sc.count, 72), by: 4) {
+                let d = sc[s]
+                print(String(format: "  %3d  %@", s, [4, 8, 16].map { d[$0].map { String(format: "%.2f", $0) } ?? " -- " }.joined(separator: " ")))
+            }
+        }
     }
 }
 

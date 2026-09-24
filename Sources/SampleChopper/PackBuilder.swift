@@ -33,10 +33,12 @@ public struct Pack: Codable, Sendable {
         public let start: Double
         public let seconds: Double
         public let peakDB: Double
+        /// For a phrase: how many later spans of the song repeat it.
+        public var repeats: Int? = nil
 
-        public init(file: String, stem: String, kind: String, label: String?, note: String?, cents: Double?, confidence: Double?, bars: Int?, bar: Int, beat: Int, start: Double, seconds: Double, peakDB: Double) {
+        public init(file: String, stem: String, kind: String, label: String?, note: String?, cents: Double?, confidence: Double?, bars: Int?, bar: Int, beat: Int, start: Double, seconds: Double, peakDB: Double, repeats: Int? = nil) {
             self.file = file; self.stem = stem; self.kind = kind; self.label = label; self.note = note; self.cents = cents; self.confidence = confidence
-            self.bars = bars; self.bar = bar; self.beat = beat; self.start = start; self.seconds = seconds; self.peakDB = peakDB
+            self.bars = bars; self.bar = bar; self.beat = beat; self.start = start; self.seconds = seconds; self.peakDB = peakDB; self.repeats = repeats
         }
     }
 
@@ -70,9 +72,13 @@ public struct PackOptions: Sendable {
     public var drumLayers = false
     /// Drum-pattern MIDI for every drum loop.
     public var drumMidi = true
+    /// Whole phrases (4, 8 or 16 bars — the smallest span that repeats) from bass, other, vocals
+    /// and a Music stem that sums them, each with its MIDI; the most-repeated are the main parts.
+    public var phrases = true
+    public var phraseOptions = PhraseFinder.Options()
     public var hits = HitCutter.Options()
     public var onsets = OnsetDetector.Options()
-    public var phrases = PhraseCutter.Options()
+    public var chops = PhraseCutter.Options()
     /// Model locations; nil means each library's installed copy.
     public var beatTracker: URL? = nil
     public var clapFolder: URL? = nil
@@ -102,7 +108,7 @@ public final class PackBuilder: @unchecked Sendable {
     public static func stems(in folder: URL) throws -> [StemAudio] {
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         var found: [StemAudio] = []
-        for kind in StemAudio.Kind.allCases {
+        for kind in StemAudio.Kind.separated {
             guard let url = files.first(where: { $0.deletingPathExtension().lastPathComponent.lowercased().hasSuffix("-" + kind.rawValue) || $0.deletingPathExtension().lastPathComponent.lowercased() == kind.rawValue }) else { continue }
             found.append(try StemAudio(kind: kind, url: url))
         }
@@ -218,7 +224,7 @@ public final class PackBuilder: @unchecked Sendable {
         // Vocal chops
         if let vocals = stems.first(where: { $0.kind == .vocals }) {
             progress?("vocal chops")
-            for (n, phrase) in PhraseCutter.cut(vocals, options: options.phrases).enumerated() {
+            for (n, phrase) in PhraseCutter.cut(vocals, options: options.chops).enumerated() {
                 let file = root.appendingPathComponent("Vocals/Chops/\(options.name) - Vocal Chop - \(two(n + 1)).wav")
                 try StemAudio.write(vocals.slice(phrase.range, fadeIn: 0.015, fadeOut: 0.015), sampleRate: sr, to: file)
                 items.append(item(file, stem: vocals, kind: "chop", range: phrase.range))
@@ -280,6 +286,40 @@ public final class PackBuilder: @unchecked Sendable {
                     items.append(Pack.Item(file: midiFile.path, stem: stem.kind.rawValue, kind: "midi", label: nil, note: nil, cents: nil, confidence: nil, bars: loop.bars,
                                            bar: grid.position(of: loop.start).bar + 1, beat: 1, start: (loop.start * 1000).rounded() / 1000,
                                            seconds: (Double(loop.range.count) / sr * 1000).rounded() / 1000, peakDB: 0))
+                }
+            }
+        }
+
+        // Phrases: the smallest repeating span of each melodic stem, and of everything but the drums
+        if options.phrases {
+            let melodic = stems.filter { $0.kind != .drums }
+            var sources = melodic
+            if melodic.count >= 2, let music = StemAudio.sum(melodic, kind: .music) { sources.append(music) }
+            for stem in sources {
+                progress?("\(stem.kind.rawValue) phrases")
+                let phrases = PhraseFinder.find(stem, grid: grid, options: options.phraseOptions)
+                for (n, phrase) in phrases.enumerated() {
+                    let keyPart = key.map { " - \($0)" } ?? ""
+                    let base = "\(options.name) - \(title(stem.kind.rawValue)) Phrase \(phrase.bars) Bar - \(bpmText) BPM\(keyPart) - \(two(n + 1))"
+                    let file = root.appendingPathComponent("\(title(stem.kind.rawValue))/Phrases/\(base).wav")
+                    try StemAudio.write(stem.slice(phrase.range, fadeIn: options.loops.fade, fadeOut: options.loops.fade), sampleRate: sr, to: file)
+                    var entry = item(file, stem: stem, kind: "phrase", range: phrase.range, bars: phrase.bars)
+                    entry.repeats = phrase.repeats
+                    items.append(entry)
+                    if options.midi, let transcriber {
+                        progress?("\(stem.kind.rawValue) phrase midi \(n + 1)/\(phrases.count)")
+                        let transcription = try await transcriber.transcribe(file, tempo: .off)
+                        let notes = transcription.notes.filter { !$0.isDrum }.map { note -> TranscribedNote in
+                            var m = note; m.onset = max(0, note.onset); m.offset = min(Double(phrase.range.count) / sr, max(m.onset + 0.03, note.offset)); return m
+                        }
+                        guard !notes.isEmpty else { continue }
+                        let midiFile = root.appendingPathComponent("\(title(stem.kind.rawValue))/MIDI/\(base).mid")
+                        try FileManager.default.createDirectory(at: midiFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try MIDIAssembly.data(notes: notes, grid: BeatGrid.fixed(bpm: grid.bpm, beatsPerBar: grid.beatsPerBar, duration: Double(phrase.range.count) / sr)).write(to: midiFile)
+                        items.append(Pack.Item(file: midiFile.path, stem: stem.kind.rawValue, kind: "midi", label: nil, note: nil, cents: nil, confidence: nil, bars: phrase.bars,
+                                               bar: phrase.startBar + 1, beat: 1, start: (phrase.start * 1000).rounded() / 1000,
+                                               seconds: (Double(phrase.range.count) / sr * 1000).rounded() / 1000, peakDB: 0, repeats: phrase.repeats))
+                    }
                 }
             }
         }
