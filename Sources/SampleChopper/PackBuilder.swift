@@ -76,6 +76,8 @@ public struct PackOptions: Sendable {
     /// and a Music stem that sums them, each with its MIDI; the most-repeated are the main parts.
     public var phrases = true
     public var phraseOptions = PhraseFinder.Options()
+    /// Force the tempo instead of detecting it; the grid is laid from the first detected downbeat.
+    public var fixedTempo: Double? = nil
     public var hits = HitCutter.Options()
     public var onsets = OnsetDetector.Options()
     public var chops = PhraseCutter.Options()
@@ -136,7 +138,7 @@ public final class PackBuilder: @unchecked Sendable {
         let beatURL = try options.beatTracker ?? ModelLocator.resolveBeatTracker()
         let tracker: BeatThisTracker
         do { tracker = try await BeatThisTracker(contentsOf: beatURL) } catch { throw ChopperError.modelMissing("Beat This! at \(beatURL.path): \(error)") }
-        let grid = try await BarGrid.detect(from: drums, tracker: tracker)
+        let grid = try await BarGrid.detect(from: drums, tracker: tracker, fixedTempo: options.fixedTempo)
 
         var key: String? = nil
         if options.detectKey, let harmonic = stems.first(where: { $0.kind == .other }) ?? stems.first(where: { $0.kind == .bass }) {

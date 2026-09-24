@@ -44,6 +44,28 @@ private func click(at times: [Double], seconds: Double, rate: Double = 48_000) -
         #expect(g.position(of: 0.1 + 1.875 * 2 + 0.47).bar == 2 && g.position(of: 0.1 + 1.875 * 2 + 0.47).beat == 2)
     }
 
+    /// Beat This! halves its beat rate under sparse sections and misses the odd downbeat;
+    /// the tempo must still come out at the downbeats' rate, and the missed bars come back.
+    @Test("half-time beats and missed downbeats do not move the tempo")
+    func halfTimeBeats() throws {
+        let bpm = 140.0, beat = 60 / bpm, bar = 4 * beat
+        var beats: [Double] = [], downbeats: [Double] = []
+        for i in 0..<40 {
+            let start = 0.92 + Double(i) * bar
+            downbeats.append(start)
+            // the first half of the track at the true rate, the second at half-time
+            for k in 0..<4 where i < 20 || k % 2 == 0 { beats.append(start + Double(k) * beat) }
+        }
+        let missing = Set([7, 13, 26])                 // three downbeats the tracker did not report
+        let g = try BarGrid(beats: beats, downbeats: downbeats.enumerated().filter { !missing.contains($0.offset) }.map(\.element))
+        #expect(abs(g.bpm - 140) < 0.2, Comment(rawValue: "\(g.bpm)"))
+        #expect(g.beatsPerBar == 4)
+        #expect(g.downbeats.count == 40, Comment(rawValue: "\(g.downbeats.count) downbeats, expected the three missing ones filled in"))
+        // a forced tempo lays a clean grid from the first downbeat
+        let forced = try BarGrid(beats: beats, downbeats: downbeats, fixedTempo: 70)
+        #expect(forced.bpm == 70 && abs(forced.barSeconds - 2 * bar) < 1e-9 && forced.downbeats.count == 20)
+    }
+
     @Test("phrases bridge short gaps and drop blips")
     func phrases() throws {
         var x = [Float](repeating: 0, count: 48_000 * 4)
@@ -129,6 +151,26 @@ private func click(at times: [Double], seconds: Double, rate: Double = 48_000) -
         let dbH = psnr(refH, h), dbP = psnr(refP, p)
         print("hpss margin \(margin): harmonic \(String(format: "%.1f", dbH)) dB, percussive \(String(format: "%.1f", dbP)) dB")
         #expect(dbH > 60 && dbP > 60)
+    }
+}
+
+@Suite struct GridDiagnostics {
+    @Test("what Beat This! returns for a stem", .enabled(if: ProcessInfo.processInfo.environment["CHOP_STEMS"] != nil))
+    func grid() async throws {
+        let folder = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CHOP_STEMS"]!)
+        let drums = try PackBuilder.stems(in: folder).first { $0.kind == .drums }!
+        let tracker = try await BeatThisTracker(contentsOf: ModelLocator.resolveBeatTracker())
+        let (beats, downbeats) = try await tracker.track(samples16k: drums.mono(at: 16_000))
+        let gaps = zip(beats.dropFirst(), beats).map { $0 - $1 }.sorted()
+        let dgaps = zip(downbeats.dropFirst(), downbeats).map { $0 - $1 }.sorted()
+        print("stem \(String(format: "%.1f", drums.seconds))s | beats \(beats.count) | downbeats \(downbeats.count)")
+        print("  beat gap: median \(String(format: "%.3f", gaps[gaps.count/2]))s → \(String(format: "%.1f", 60/gaps[gaps.count/2])) BPM; 10th \(String(format: "%.3f", gaps[gaps.count/10]))s, 90th \(String(format: "%.3f", gaps[gaps.count*9/10]))s")
+        print("  downbeat gap: median \(String(format: "%.3f", dgaps[dgaps.count/2]))s; 10th \(String(format: "%.3f", dgaps[dgaps.count/10]))s, 90th \(String(format: "%.3f", dgaps[dgaps.count*9/10]))s")
+        print("  beats per bar counts: \(Dictionary(grouping: zip(downbeats, downbeats.dropFirst()).map { a, b in beats.filter { $0 >= a - 1e-3 && $0 < b - 1e-3 }.count }, by: { $0 }).mapValues(\.count).sorted { $0.key < $1.key })")
+        print("  first beats: \(beats.prefix(9).map { String(format: "%.3f", $0) })")
+        print("  first downbeats: \(downbeats.prefix(5).map { String(format: "%.3f", $0) })")
+        let g = try BarGrid(beats: beats, downbeats: downbeats)
+        print("  BarGrid → \(g.bpm) BPM, \(g.beatsPerBar)/4, bar \(String(format: "%.3f", g.barSeconds))s, \(g.downbeats.count) downbeats")
     }
 }
 
