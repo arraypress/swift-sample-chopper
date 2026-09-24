@@ -23,8 +23,9 @@ music-transcriber's URL dep on it ("conflicting identity").
   `bars × round(barSeconds × sr)`; the latter was 1–2 samples long.
 - Ghost hits (−43 dBFS) pass the onset detector; drop hits more than 24 dB
   under the stem's 95th-percentile hit peak before naming.
-- `MusicTranscriber.transcribe(url, tempo: .off)` for MIDI, then shift notes
-  by the first downbeat and assemble with `BeatGrid.fixed(bpm:)` — bar 1 is
-  the pack's bar 1.
+- MIDI is PER LOOP (the user: "generated on the clean samples"): transcribe
+  the written loop file with `tempo: .off`, clamp notes to the loop, assemble
+  with `BeatGrid.fixed(bpm:)` so bar 1 is the loop's start. `midiFull` (off)
+  does the whole stem shifted to the first downbeat.
 - One Core AI job on the GPU at a time; the builder runs its models one after
   another.

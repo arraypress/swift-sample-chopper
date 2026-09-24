@@ -69,8 +69,11 @@ public struct PackOptions: Sendable {
     public var clapFolder: URL? = nil
     public var crepeAsset: URL? = nil
     public var detectKey = true
-    /// MIDI for the melodic stems (bass, other, vocals) with MuScriptor, tempo-locked to the grid.
+    /// MIDI for every melodic loop (bass, other, vocals), transcribed from that loop alone with
+    /// MuScriptor, bar 1 at the loop's start, the pack's tempo.
     public var midi = true
+    /// Also one MIDI file per melodic stem over the whole song (slow: most of a run).
+    public var midiFull = false
     public var midiVariant: ModelVariant = .medium
     public var midiModel: URL? = nil
     /// One-shots peak-normalised to this level; nil keeps the stem's own level.
@@ -208,26 +211,44 @@ public final class PackBuilder: @unchecked Sendable {
             }
         }
 
-        // Loops from every stem
+        // Loops from every stem — and, for the melodic stems, MIDI of each loop from that loop alone
+        var transcriber: MusicTranscriber? = nil
+        if options.midi || options.midiFull {
+            let modelURL = try options.midiModel ?? ModelLocator.resolve(variant: options.midiVariant)
+            do { transcriber = try await MusicTranscriber(model: modelURL) } catch { throw ChopperError.modelMissing("MuScriptor at \(modelURL.path): \(error)") }
+        }
         for stem in stems {
             progress?("\(stem.kind.rawValue) loops")
             var counter: [Int: Int] = [:]
-            for loop in LoopCutter.cut(stem, grid: grid, options: options.loops) {
+            let loops = LoopCutter.cut(stem, grid: grid, options: options.loops)
+            for (i, loop) in loops.enumerated() {
                 let n = counter[loop.bars, default: 0] + 1; counter[loop.bars] = n
                 let keyPart = key.map { " - \($0)" } ?? ""
-                let file = root.appendingPathComponent("\(title(stem.kind.rawValue))/Loops/\(options.name) - \(title(stem.kind.rawValue)) Loop \(loop.bars) Bar - \(bpmText) BPM\(keyPart) - \(two(n)).wav")
+                let base = "\(options.name) - \(title(stem.kind.rawValue)) Loop \(loop.bars) Bar - \(bpmText) BPM\(keyPart) - \(two(n))"
+                let file = root.appendingPathComponent("\(title(stem.kind.rawValue))/Loops/\(base).wav")
                 try StemAudio.write(stem.slice(loop.range, fadeIn: options.loops.fade, fadeOut: options.loops.fade), sampleRate: sr, to: file)
                 items.append(item(file, stem: stem, kind: "loop", range: loop.range, bars: loop.bars))
+                if options.midi, stem.kind != .drums, let transcriber {
+                    progress?("\(stem.kind.rawValue) loop midi \(i + 1)/\(loops.count)")
+                    let transcription = try await transcriber.transcribe(file, tempo: .off)
+                    let notes = transcription.notes.filter { !$0.isDrum }.map { n -> TranscribedNote in
+                        var m = n; m.onset = max(0, n.onset); m.offset = min(Double(loop.range.count) / sr, max(m.onset + 0.03, n.offset)); return m
+                    }
+                    guard !notes.isEmpty else { continue }
+                    let midiFile = root.appendingPathComponent("\(title(stem.kind.rawValue))/MIDI/\(base).mid")
+                    try FileManager.default.createDirectory(at: midiFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try MIDIAssembly.data(notes: notes, grid: BeatGrid.fixed(bpm: grid.bpm, beatsPerBar: grid.beatsPerBar, duration: Double(loop.range.count) / sr)).write(to: midiFile)
+                    items.append(Pack.Item(file: midiFile.path, stem: stem.kind.rawValue, kind: "midi", label: nil, note: nil, cents: nil, confidence: nil, bars: loop.bars,
+                                           bar: grid.position(of: loop.start).bar + 1, beat: 1, start: (loop.start * 1000).rounded() / 1000,
+                                           seconds: (Double(loop.range.count) / sr * 1000).rounded() / 1000, peakDB: 0))
+                }
             }
         }
 
-        // MIDI for the melodic stems, bar 1 on the first downbeat, the pack's tempo
-        if options.midi {
+        // Whole-stem MIDI (optional), bar 1 on the first downbeat, the pack's tempo
+        if options.midiFull, let transcriber {
             let melodic = stems.filter { $0.kind != .drums }
             if !melodic.isEmpty {
-                let modelURL = try options.midiModel ?? ModelLocator.resolve(variant: options.midiVariant)
-                let transcriber: MusicTranscriber
-                do { transcriber = try await MusicTranscriber(model: modelURL) } catch { throw ChopperError.modelMissing("MuScriptor at \(modelURL.path): \(error)") }
                 let first = grid.downbeats.first ?? 0
                 let fixedGrid = BeatGrid.fixed(bpm: grid.bpm, beatsPerBar: grid.beatsPerBar, duration: drums.seconds)
                 for stem in melodic {
@@ -237,7 +258,7 @@ public final class PackBuilder: @unchecked Sendable {
                         var m = n; m.onset = max(0, n.onset - first); m.offset = max(m.onset + 0.03, n.offset - first); return m
                     }
                     guard !notes.isEmpty else { continue }
-                    let file = root.appendingPathComponent("\(title(stem.kind.rawValue))/MIDI/\(options.name) - \(title(stem.kind.rawValue)) - \(bpmText) BPM\(key.map { " - \($0)" } ?? "").mid")
+                    let file = root.appendingPathComponent("\(title(stem.kind.rawValue))/MIDI/\(options.name) - \(title(stem.kind.rawValue)) Full - \(bpmText) BPM\(key.map { " - \($0)" } ?? "").mid")
                     try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try MIDIAssembly.data(notes: notes, grid: fixedGrid).write(to: file)
                     items.append(Pack.Item(file: file.path, stem: stem.kind.rawValue, kind: "midi", label: nil, note: nil, cents: nil, confidence: nil, bars: nil,
